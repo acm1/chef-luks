@@ -29,6 +29,26 @@ action :create do
   end
 end
 
+action :open do
+  if @current_resource.open
+    Chef::Log.info "#{@new_resource} is already open - nothing to do."
+  else
+    converge_by("Open #{@new_resource}") do
+      luks_open_device
+    end
+  end
+end
+
+action :close do
+  if @current_resource.open
+    converge_by("Close #{@new_resource}") do
+      luks_close_device
+    end
+  else
+    Chef::Log.info "#{@new_resource} is not open - nothing to do."
+  end
+end
+
 def whyrun_supported?
   true
 end
@@ -36,9 +56,14 @@ end
 def load_current_resource
   @current_resource = Chef::Resource::LuksDevice.new(@new_resource.name)
   @current_resource.key_file(@new_resource.key_file)
+  @current_resource.luks_name(@new_resource.luks_name)
 
   if is_luks_device? @current_resource.block_device
     @current_resource.exists = true
+  end
+
+  if is_open? @current_resource.luks_name
+    @current_resource.open = true
   end
 end
 
@@ -50,9 +75,14 @@ def is_luks_device?(block_device)
   cmd.exitstatus == 0
 end
 
+def is_open?(name)
+  cmd = Mixlib::ShellOut.new('/sbin/cryptsetup', '-q', 'status', name).run_command
+  cmd.exitstatus == 0
+end
+
 def append_to_crypttab(block_device, luks_name, key_file, options={})
   ::File.open('/etc/crypttab', 'a') do |crypttab|
-    crypttab.puts("#{luks_name}\t#{block_device}\t#{key_file}")
+    crypttab.puts("#{luks_name}\t#{block_device}\t#{key_file}\tluks")
   end
 end
 
@@ -67,14 +97,22 @@ def luks_open_device
     new_resource.luks_name, new_resource.key_file
 end
 
+def luks_close_device
+  cmd = Mixlib::ShellOut.new('/sbin/cryptsetup', '-q', 'luksClose', new_resource.luks_name).run_command
+
+  raise Chef::Exceptions::LUKS.new cmd.stderr if cmd.exitstatus != 0
+
+  editor = Chef::Util::FileEdit.new('/etc/crypttab')
+  editor.search_file_delete_line(/^#{new_resource.luks_name}/)
+  editor.write_file
+end
+
 def luks_format_device
   cmd = Mixlib::ShellOut.new(
     '/sbin/cryptsetup', '-q', 'luksFormat',
     new_resource.block_device, new_resource.key_file).run_command
 
-  if cmd.exitstatus == 0
-    luks_open_device
-  else
+  if cmd.exitstatus != 0
     raise Chef::Exceptions::LUKS.new cmd.stderr
   end
 end
